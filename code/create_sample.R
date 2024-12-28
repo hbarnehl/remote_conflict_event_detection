@@ -92,3 +92,125 @@ ggmap(basemap) +
           alpha = 0.2,
           inherit.aes = FALSE) +
   theme_void()
+
+# calculate pairwise distance between locations within same admin1 #############
+
+library(furrr)
+library(tidyverse)
+
+plan(multisession, workers = 4)
+
+# create df with unique locations
+unique_locations <- df %>%
+  filter(geo_precision ==1,
+         event_type=="Explosions/Remote violence") %>%
+  select(location, admin1, longitude, latitude) %>%
+  unique()
+
+# Convert to sf object and transform CRS if necessary
+sf_df <- st_as_sf(unique_locations, coords = c("longitude", "latitude"), crs = 4326)
+
+# Create a function to calculate the distance between two points
+calculate_distance <- function(point1, point2) {
+  return(st_distance(point1, point2))
+}
+
+polygon_pairs <- expand.grid(1:nrow(sf_buffer), 1:nrow(sf_buffer))
+
+# Remove pairs where the indices are the same (i.e., the same polygon)
+polygon_pairs <- polygon_pairs[polygon_pairs$Var1 != polygon_pairs$Var2, ]
+
+# remove polygon pairs that are not in the same admin1
+polygon_pairs <- polygon_pairs %>%
+  mutate(admin1_1 = sf_df$admin1[Var1],
+         admin1_2 = sf_df$admin1[Var2]) %>%
+  filter(admin1_1 == admin1_2)
+
+# distance results
+distance_results <- polygon_pairs %>%
+  mutate(distance = future_pmap_dbl(
+    list(Var1, Var2),
+    ~ calculate_distance(sf_df$geometry[.x], sf_df$geometry[.y])
+  ))
+
+# add location1, location2, geometry1, and geometry 2 to distance_results
+distance_results2 <- distance_results %>%
+  mutate(location1 = sf_df$location[Var1],
+         location2 = sf_df$location[Var2],
+         geometry1 = sf_df$geometry[Var1],
+         geometry2 = sf_df$geometry[Var2])
+
+# save results
+write_csv(distance_results2, "data/distance_between_locations.csv")
+
+# calculate pairwise overlap between buffers ##################################
+
+library(progress)
+
+pb <- progress_bar$new(
+  format = "  Processing [:bar] :percent in :elapsed",
+  total = nrow(polygon_pairs),
+  clear = FALSE,
+  width = 60
+)
+
+# create df with unique locations
+unique_locations <- df %>%
+  filter(geo_precision ==1,
+         event_type=="Explosions/Remote violence") %>%
+  select(location, admin1, longitude, latitude) %>%
+  unique()
+
+# Convert to sf object and transform CRS if necessary
+sf_df <- st_as_sf(unique_locations, coords = c("longitude", "latitude"), crs = 4326)
+
+# I dont think I need to transform it, because 4326 seems to work fine
+
+# # Transform to a projected CRS for buffering
+# municip_sf_proj <- st_transform(municip_sf, crs = 4326) # Using Web Mercator for example
+
+sf_buffer <- st_buffer(sf_df,
+                            dist = 2500,
+                            joinStyle = "ROUND")
+
+
+# Create a function to calculate the intersection area between two polygons
+calculate_overlap <- function(poly1, poly2) {
+  intersection <- st_intersection(poly1, poly2)
+  if (length(intersection) > 0) {
+    return(st_area(intersection[2]))
+  } else {
+    return(0)
+  }
+}
+
+# Get all combinations of polygon pairs
+polygon_pairs <- expand.grid(1:nrow(sf_buffer), 1:nrow(sf_buffer))
+
+# Remove pairs where the indices are the same (i.e., the same polygon)
+polygon_pairs <- polygon_pairs[polygon_pairs$Var1 != polygon_pairs$Var2, ]
+
+# remove polygon pairs that are not in the same admin1
+polygon_pairs <- polygon_pairs %>%
+  mutate(admin1_1 = sf_df$admin1[Var1],
+         admin1_2 = sf_df$admin1[Var2]) %>%
+  filter(admin1_1 == admin1_2)
+
+# Calculate overlap for each pair
+overlap_results <- polygon_pairs %>%
+  rowwise() %>%
+  mutate(overlap_area = {
+    # Update the progress bar
+    pb$tick()
+    
+    # Calculate the overlap area
+    calculate_overlap(sf_buffer$geometry[Var1], sf_buffer$geometry[Var2])
+  }) %>%
+  ungroup()
+
+# Create a new dataframe with the results
+overlap_df <- overlap_results %>%
+  select(polygon1 = Var1, polygon2 = Var2, overlap_area)
+
+# View the results
+print(overlap_df)

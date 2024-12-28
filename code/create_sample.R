@@ -27,14 +27,16 @@ buffers <- st_transform(buffers, crs = 4326)
 
 ## create admin2 bounding box ####
 # find admin2 of Kyiv
-admin2_val <- "Kyiv"
+admin2_val <- "Polohivskyi"
 
-example_location <- df %>% filter(admin2 == admin2_val) %>%
-  first() %>%
-  select(longitude, latitude)
+average_location <- df %>%
+  filter(admin2 == admin2_val) %>%
+  select(longitude, latitude) %>% 
+  unique() %>% 
+  summarise(longitude=mean(longitude),latitude=mean(latitude))
 
 # Convert to sf object and transform CRS if necessary
-admin2_sf <- st_as_sf(example_location, coords = c("longitude", "latitude"), crs = 4326)
+admin2_sf <- st_as_sf(average_location, coords = c("longitude", "latitude"), crs = 4326)
 
 # # Transform to a projected CRS for buffering
 # admin2_sf_proj <- st_transform(admin2_sf, crs = 3857) # Using Web Mercator for example
@@ -60,7 +62,11 @@ basemap <- get_stadiamap(
 
 ## create municipality buffer ####
 # extract coordinates of all locations in admin2
-municip <- df %>% filter(admin2 == admin2_val) %>% select(longitude, latitude) %>% unique()
+municip <- df %>%
+  filter(admin2 == admin2_val,
+         geo_precision ==1) %>%
+  select(longitude, latitude) %>%
+  unique()
 
 # Convert to sf object and transform CRS if necessary
 municip_sf <- st_as_sf(municip, coords = c("longitude", "latitude"), crs = 4326)

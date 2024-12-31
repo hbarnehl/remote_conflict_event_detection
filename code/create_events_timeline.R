@@ -1,8 +1,14 @@
 library(tidyverse)
 
 df <- read_csv("data/ACLED_Ukraine_2013-11-01-2024-12-16.csv")
-
+places <- read_csv("data/places.csv")
 # Create events timeline ######################################################
+
+# join location id from places into df
+df <- df %>% 
+  left_join(places %>% 
+              select(location, latitude, longitude, location_id),
+            by=c("location", "latitude", "longitude"))
 
 # filter df
 df_filtered <- df %>% 
@@ -29,13 +35,6 @@ df_filtered <- df %>%
 # with the same name
 
 
-# create list of distinct places and of all days from beginning to end of data
-
-places <- df_filtered %>% 
-  distinct(location, latitude, longitude) %>% 
-  arrange(location) %>% 
-  mutate(location_id = row_number())
-
 # use lubridate to change date to date format
 df_filtered <- df_filtered %>% 
   mutate(event_date = dmy(event_date))
@@ -44,33 +43,54 @@ days <- seq.Date(min(df_filtered$event_date), max(df_filtered$event_date), by="d
 
 # create new data frame with all combinations of places and days
 df_all <- expand_grid(places, days) %>% 
-  rename(event_date = days)
+  rename(event_date = days) %>% 
+  select(location_id, event_date, loc_less_3000m)
 
 # left join the filtered data with the all data
 df_all_joined <- df_all %>% 
-  left_join(df_filtered, by=c("location", "latitude", "longitude", "event_date"))
+  left_join(df_filtered, by=c("location_id", "event_date"))
+
+# remove unneeded columns
+df_all_joined <- df_all_joined %>% 
+  select(-c(geo_precision, time_precision, source_scale, source, iso,
+            inter1, inter2, interaction, disorder_type, tags, timestamp,
+            country, admin1, admin2, admin3, location, latitude, longitude,
+            actor1, actor2, assoc_actor_1, assoc_actor_2, region, notes,
+            fatalities, civilian_targeting, event_type, sub_event_type, year))
 
 
 # create a new column that is 1 if there was an event and 0 if there wasn't
 df_all_joined <- df_all_joined %>% 
   mutate(event = ifelse(is.na(event_id_cnty), 0, 1))
 
-# remove unneeded columns
-df_all_joined <- df_all_joined %>% 
-  select(-c(geo_precision, time_precision, source_scale, source, iso,
-            inter1, inter2, interaction, disorder_type, tags, timestamp,
-            country))
+# create a new column that is 1 if there was an event in a location less than
+# 3000 m away
+df_all_joined_1 <- df_all_joined %>%
+  mutate(loc_less_3000m = str_split(loc_less_3000m, ",\\s*")) %>%
+  unnest(loc_less_3000m) %>%
+  mutate(loc_less_3000m = as.integer(loc_less_3000m)) %>% 
+  left_join(df_all_joined %>%
+              select(location_id, event_date, event) %>% 
+              rename(event_2 =event), 
+            by = c("loc_less_3000m" = "location_id", "event_date")) %>% 
+  group_by(location_id, event_date) %>%
+  summarise(overlapping_event = as.integer(any(event_2 == 1, na.rm = TRUE)), .groups = 'drop') %>%
+  right_join(df_all_joined, by = c("location_id", "event_date")) %>%
+  mutate(overlapping_event = replace_na(overlapping_event, 0))
 
+# create new binary column "any_event" that is 1 if either event or overlapping_event is 1
+df_all_joined_1 <- df_all_joined_1 %>% 
+  mutate(any_event = ifelse(event == 1 | overlapping_event == 1, 1, 0))
 
 # Extract positives and negatives #############################################
 
 
 # create binary variable to record if attack is first in a location
-df_final <- df_all_joined %>% 
+df_final <- df_all_joined_1 %>% 
   group_by(location_id) %>%
   arrange(event_date) %>%
-  mutate(cum_attack = cumsum(event),
-         n_attack = ifelse(event == 0, NA, cum_attack),
+  mutate(cum_attack = cumsum(any_event),
+         n_attack = ifelse(any_event == 0, NA, cum_attack),
          first_attack = ifelse(n_attack == 1, 1, 0)) %>% 
   ungroup()
 
@@ -81,8 +101,8 @@ create_event_iso <- function(df, window_size, attack) {
   name <- ifelse(attack == 1, "attack_window", "non_attack_window")
   df %>%
     mutate(!!paste0(name, window_size) := ifelse(
-      event == attack & 
-        rowSums(sapply(1:window_size, function(i) lead(event, i) == 0 & lag(event, i) == 0)) == window_size,
+      any_event == attack & 
+        rowSums(sapply(1:window_size, function(i) lead(any_event, i) == 0 & lag(any_event, i) == 0)) == window_size,
       1, 0
     ))
 }
@@ -101,6 +121,13 @@ df_final <- df_final %>%
   { create_event_iso(., 4, attack=0) } %>%
   { create_event_iso(., 5, attack=0) } %>%
   ungroup()
+
+# remove unnecessary columns
+df_final <- df_final %>% 
+  select(-c(loc_less_3000m))
+
+# create timeline id
+df_final <- df_final %>% mutate(timeline_id = row_number())
 
 # save the data
 write_csv(df_final, "data/ACLED_Ukraine_events_timeline.csv")

@@ -52,7 +52,7 @@ async def main_order(geom, items, request_name, item_type, asset_type):
        order = await create_and_download(cl, request, DOWNLOAD_DIR)
 
 
-def set_filters(from_date: str, to_date:str, geom):
+def set_filters(from_date, to_date, geom):
     '''
     This function sets the filters for the search of images.
 
@@ -70,7 +70,7 @@ def set_filters(from_date: str, to_date:str, geom):
     # clear_percent_filter = data_filter.range_filter('clear_percent', gt = min_clear)
 
     # only look for images between following dates
-    date_range_filter = data_filter.date_range_filter("acquired", gt = datetime.strptime(from_date, "%Y-%m-%d"), lt=datetime.strptime(to_date, "%Y-%m-%d"))
+    date_range_filter = data_filter.date_range_filter("acquired", gt = from_date, lt=to_date)
 
     # # cloudcover less than 0.1
     # cloud_cover_filter = data_filter.range_filter('cloud_cover', lt = 0.1)

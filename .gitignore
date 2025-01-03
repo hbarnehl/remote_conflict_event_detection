@@ -4,3 +4,6 @@
 *.png
 data/*
 search_results/*
+*.pdf
+*.pyc
+*.log

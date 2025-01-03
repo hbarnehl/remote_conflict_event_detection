@@ -1,5 +1,7 @@
 from planet import order_request, Session, reporting, data_filter
 from datetime import datetime
+import os
+import json
 
 
 def parse_polygon(polygon_str):
@@ -95,3 +97,32 @@ async def create_and_download_search(name,filter, item_types="PSScene"):
         item_list = [i async for i in items]
     
     return item_list
+
+def load_search_files(folder_path, num_files, timeline_ids=None, start_index=0):
+    files = os.listdir(folder_path)
+    json_data = []
+
+    if timeline_ids:
+        # Load files by timeline_ids
+        files_to_load = [f for f in files if any(timeline_id in f for timeline_id in timeline_ids)]
+    else:
+        # Load files by alphabetic order with starting index
+        files_to_load = sorted(files)[start_index:start_index + num_files]
+
+    for file_name in files_to_load:
+        with open(os.path.join(folder_path, file_name), 'r') as file:
+            data = json.load(file)
+            json_data.append(data)
+
+    if len(json_data) == 1:
+        json_data = json_data[0]
+
+    return json_data
+
+# Example usage:
+# folder_path = '../data/searches'
+# num_files = 10
+# start_index = 5
+# timeline_ids = ['events_12345', 'non-events_67890']
+# data = load_json_files(folder_path, num_files, timeline_ids, start_index)
+# print(data)

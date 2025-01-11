@@ -110,10 +110,13 @@ def load_search_files(folder_path, num_files, timeline_ids=None, start_index=0):
         files_to_load = sorted(files)[start_index:start_index + num_files]
 
     for file_name in files_to_load:
-        with open(os.path.join(folder_path, file_name), 'r') as file:
-            data = json.load(file)
-            json_data.append(data)
-
+        try:
+            with open(os.path.join(folder_path, file_name), 'r') as file:
+                data = json.load(file)
+                json_data.append(data)
+        except Exception as e:
+            print(f"Error loading file {file_name}: {e}")
+            continue
     if len(json_data) == 1:
         json_data = json_data[0]
 

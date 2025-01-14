@@ -15,7 +15,7 @@ def parse_polygon(polygon_str):
     return [coordinates]
 
 
-def create_request(geom, items, request_name, item_type, asset_type):
+def create_request(search_dict):
    '''
    This function creates an order request for the specified geometry, items, request name, item type, and asset type.
    geom: The geometry of the location of interest. This is used to clip the images to the specified area.
@@ -25,13 +25,21 @@ def create_request(geom, items, request_name, item_type, asset_type):
    asset_type: The type of asset to be ordered, e.g. ortho_visual, ortho_analytic_4b 
    '''
    order = order_request.build_request(
-       name=request_name,
+       name=search_dict["name"],
        products=[
-           order_request.product(item_ids=items,
-                                        product_bundle=asset_type,
-                                        item_type=item_type)
+           order_request.product(item_ids=search_dict["item_ids"],
+                                        product_bundle="analytic_udm2",
+                                        item_type="PSScene")
        ],
-       tools=[order_request.clip_tool(aoi=geom)])
+       tools=[order_request.clip_tool(aoi=search_dict["geom"]),
+              order_request.composite_tool()
+              ],
+        delivery = order_request.delivery(
+            archive_type='zip',
+            single_archive=True,
+            archive_filename='{{name}}.zip'
+            )
+        )
 
    return order
 
@@ -39,19 +47,16 @@ async def create_and_download_order(client, order_detail, directory):
    with reporting.StateBar(state='creating') as reporter:
        order = await client.create_order(order_detail)
        reporter.update(state='created', order_id=order['id'])
-       await client.wait(order['id'], callback=reporter.update_state)
+       await client.wait(order['id'], callback=reporter.update_state, max_attempts=600)
 
    await client.download_order(order['id'], directory, progress_bar=True)
 
-async def main_order(geom, items, request_name, item_type, asset_type):
-   async with Session() as sess:
-       cl = sess.client('orders')
-
+async def main_order(DOWNLOAD_DIR, search, cl):
        # Create the order request
-       request = create_request(geom, items, request_name, item_type, asset_type)
+       request = create_request(search)
 
        # Create and download the order
-       order = await create_and_download(cl, request, DOWNLOAD_DIR)
+       order = await create_and_download_order(cl, request, DOWNLOAD_DIR)
 
 
 def set_filters(from_date, to_date, geom):

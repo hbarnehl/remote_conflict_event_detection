@@ -1,14 +1,11 @@
 library(tidyverse)
+library(sf)
+
 
 df <- read_csv("data/ACLED_Ukraine_2013-11-01-2024-12-16.csv")
 places <- read_csv("data/places.csv")
-# Create events timeline ######################################################
 
-# join location id from places into df
-df <- df %>% 
-  left_join(places %>% 
-              select(location, latitude, longitude, location_id),
-            by=c("location", "latitude", "longitude"))
+# Create events timeline ######################################################
 
 # filter df
 df_filtered <- df %>% 
@@ -17,6 +14,7 @@ df_filtered <- df %>%
                                "Shelling/artillery/missile attack"),
          geo_precision == 1,
          time_precision == 1)
+
 
 # are there locations that have more than one pair of coordinates?
 # df_filtered %>% 
@@ -97,29 +95,37 @@ df_final <- df_all_joined_1 %>%
 # create binary variables to indicate if attack is isolated in 2,4,6,8,10 day window
 
 # Helper function to create event_iso variables
-create_event_iso <- function(df, window_size, attack) {
-  name <- ifelse(attack == 1, "attack_window", "non_attack_window")
+create_attack_iso <- function(df, window_size) {
   df %>%
-    mutate(!!paste0(name, window_size) := ifelse(
-      any_event == attack & 
-        rowSums(sapply(1:window_size, function(i) lead(any_event, i) == 0 & lag(any_event, i) == 0)) == window_size,
-      1, 0
+    mutate(!!paste0("attack_window", window_size) := ifelse(
+      event == 1 & 
+        rowSums(sapply(1:window_size, function(i) lead(any_event, i) == 0 &
+                         lag(any_event, i) == 0)) == window_size, 1, 0
+    ))
+}
+
+create_non_attack_iso <- function(df, window_size) {
+  df %>%
+    mutate(!!paste0("non_attack_window", window_size) := ifelse(
+      any_event == 0 & 
+        rowSums(sapply(1:window_size, function(i) lead(any_event, i) == 0 &
+                         lag(any_event, i) == 0)) == window_size, 1, 0
     ))
 }
 
 # Apply the helper function for each window size
 df_final <- df_final %>%
   group_by(location_id) %>%
-  { create_event_iso(., 1, attack=1) } %>%
-  { create_event_iso(., 2, attack=1) } %>%
-  { create_event_iso(., 3, attack=1) } %>%
-  { create_event_iso(., 4, attack=1) } %>%
-  { create_event_iso(., 5, attack=1) } %>% 
-  { create_event_iso(., 1, attack=0) } %>%
-  { create_event_iso(., 2, attack=0) } %>%
-  { create_event_iso(., 3, attack=0) } %>%
-  { create_event_iso(., 4, attack=0) } %>%
-  { create_event_iso(., 5, attack=0) } %>%
+  { create_event_iso(., 1) } %>%
+  { create_event_iso(., 2) } %>%
+  { create_event_iso(., 3) } %>%
+  { create_event_iso(., 4) } %>%
+  { create_event_iso(., 5) } %>% 
+  { create_non_attack_iso(., 1) } %>%
+  { create_non_attack_iso(., 2) } %>%
+  { create_non_attack_iso(., 3) } %>%
+  { create_non_attack_iso(., 4) } %>%
+  { create_non_attack_iso(., 5) } %>%
   ungroup()
 
 # remove unnecessary columns

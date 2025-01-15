@@ -14,6 +14,17 @@ def parse_polygon(polygon_str):
     # Wrap the list of coordinates in an additional list to match the desired structure
     return [coordinates]
 
+def repair_aoi(geom):
+    from shapely.geometry import Polygon
+    from shapely.validation import make_valid
+    polygon = Polygon(geom)
+    if not polygon.is_valid:
+        repaired_geom = make_valid(polygon)
+        repaired_geom = repaired_geom.geoms[0].exterior.coords[:]
+        repaired_geom = [list(pair) for pair in repaired_geom]
+        return repaired_geom
+    else:
+        return geom
 
 def create_request(search_dict):
    '''
@@ -43,20 +54,20 @@ def create_request(search_dict):
 
    return order
 
-async def create_and_download_order(client, order_detail, directory):
+async def create_and_download_order(client, order_detail, directory, download=True):
    with reporting.StateBar(state='creating') as reporter:
        order = await client.create_order(order_detail)
        reporter.update(state='created', order_id=order['id'])
        await client.wait(order['id'], callback=reporter.update_state, max_attempts=600)
+   if download:
+       await client.download_order(order['id'], directory, progress_bar=True)
 
-   await client.download_order(order['id'], directory, progress_bar=True)
-
-async def main_order(DOWNLOAD_DIR, search, cl):
+async def main_order(DOWNLOAD_DIR, search, cl, download=True):
        # Create the order request
        request = create_request(search)
 
        # Create and download the order
-       order = await create_and_download_order(cl, request, DOWNLOAD_DIR)
+       order = await create_and_download_order(cl, request, DOWNLOAD_DIR, download)
 
 
 def set_filters(from_date, to_date, geom):
@@ -127,10 +138,82 @@ def load_search_files(folder_path, num_files, timeline_ids=None, start_index=0):
 
     return json_data
 
-# Example usage:
-# folder_path = '../data/searches'
-# num_files = 10
-# start_index = 5
-# timeline_ids = ['events_12345', 'non-events_67890']
-# data = load_json_files(folder_path, num_files, timeline_ids, start_index)
-# print(data)
+
+def get_offline_order_names(directory, files=None):
+    import os
+    import json
+    from tqdm import tqdm
+    
+    if not files:
+        files = os.listdir(directory)
+    
+    order_names = []
+
+    print("parsing files")
+    for file in tqdm(files):
+        with open(directory+"/"+file, 'r') as f:
+            data = json.load(f)
+            order_name = data['name']
+            order_names.append(order_name)
+    
+    return order_names
+
+def get_latest_file_creation_date(directory, files=None):
+    import os
+    import json
+    from tqdm import tqdm
+
+    if not files:
+        files = os.listdir(directory)
+    # Get the file with the latest creation time
+    created_on = []
+
+    print("parsing files")
+    for file in tqdm(files):
+        with open(directory+"/"+file, 'r') as f:
+            data = json.load(f)
+            creation_time = data['created_on']
+            created_on.append(creation_time)
+    # get the latest creation time
+    creation_time = max(created_on)
+
+    return creation_time
+
+# write function to download the metadata of all orders whose metadata has not been downloaded yet
+async def download_order_metadata(ORDER_DIR, creation_time=None):
+    import os
+    import json
+    from tqdm import tqdm
+    
+    files = os.listdir(ORDER_DIR)
+    if not creation_time:
+        creation_time = get_latest_file_creation_date(ORDER_DIR, files)
+    
+    from_date = creation_time+"/.."
+
+    print(f"downloading orders from {from_date.split('.')[0]}")
+
+    async with Session() as sess:
+        try:
+            cl = sess.client('orders')
+            orders_online = [o async for o in cl.list_orders(limit=0, created_on=from_date)]
+        except Exception as e:
+            logging.error(f"could not retrieve orders: {e}")
+            return
+        
+        print(f"{len(orders_online)} orders online")
+        # filter online orders
+        orders_online = [o for o in orders_online if o['id']+".json" not in files]
+        print(f"{len(orders_online)} not yet downloaded")
+
+        # download metadata of online orders
+        if len(orders_online) > 0:
+            print("writing orders to disk")
+            for order in orders_online:
+                order_id = order['id']
+                try:
+                    with open(f"{ORDER_DIR}/{order_id}.json", "w") as f:
+                        json.dump(order, f, indent=4)
+                except Exception as e:
+                    logging.error(f"{order_id}: {e}")
+

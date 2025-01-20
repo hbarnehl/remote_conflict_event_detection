@@ -69,10 +69,10 @@ def prepare_data(sample_df, places_df):
     random_seed = 42
 
     # sample 1000 rows where search_id starts with "events"
-    events_sample = df[df["search_id"].str.startswith("events")].sample(1000, random_state=random_seed)
+    events_sample = df[df["search_id"].str.startswith("events")]
 
     # sample 1000 rows where search_id starts with "non_events"
-    non_events_sample = df[df["search_id"].str.startswith("non_events")].sample(1000, random_state=random_seed)
+    non_events_sample = df[df["search_id"].str.startswith("non_events")]
 
     # combine both samples in one df
     output_df = pd.concat([events_sample, non_events_sample])

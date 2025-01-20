@@ -35,11 +35,11 @@ merged_df <- merged_df %>%
          within_attack_window = if_else(max_distance <= attack_window, 1, 0),
          within_non_attack_window = if_else(max_distance <= non_attack_window, 1,0)) %>% 
   # keep only rows where within window
-  filter(within_attack_window == 1 | within_non_attack_window == 1)
+  filter(within_non_attack_window == 1 | event==1)
 
 # keep columns search_id, before_image_id, after_image_id, geometry
 merged_df <- merged_df %>% 
-  select(search_id, before_image_id, after_image_id)
+  select(search_id, before_image_id, after_image_id, location_id)
 
 
 # save the dataframe

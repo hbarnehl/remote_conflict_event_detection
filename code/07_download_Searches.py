@@ -73,8 +73,8 @@ async def main():
 
 if __name__ == "__main__":
     DOWNLOAD_DIR = '../data/planet_data'
-    FILTER_DIR = '../data/filters'  
-    SEARCH_DIR = "../data/searches"
+    FILTER_DIR = '../data/filters_sudan'  
+    SEARCH_DIR = "../data/searches_sudan"
 
     user = input("Username: ")
     pw = getpass.getpass()

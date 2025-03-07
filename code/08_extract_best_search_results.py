@@ -176,8 +176,8 @@ def main():
 
 
     DATA_DIR = "../data"
-    SEARCH_DIR = DATA_DIR + "/searches"
-    OUTPUT_CSV = DATA_DIR + "/best_search_results.csv"
+    SEARCH_DIR = DATA_DIR + "/searches_sudan"
+    OUTPUT_CSV = DATA_DIR + "/sudan_best_search_results.csv"
 
     # check if output_csv exists
     if os.path.exists(OUTPUT_CSV):

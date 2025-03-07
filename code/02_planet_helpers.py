@@ -146,6 +146,8 @@ def get_offline_order_names(directory, files=None):
     
     if not files:
         files = os.listdir(directory)
+        if len(files) == 0:
+            return
     
     order_names = []
 
@@ -165,6 +167,8 @@ def get_latest_file_creation_date(directory, files=None):
 
     if not files:
         files = os.listdir(directory)
+        if len(files) == 0:
+            return None
     # Get the file with the latest creation time
     created_on = []
 
@@ -188,6 +192,8 @@ async def download_order_metadata(ORDER_DIR, creation_time=None):
     files = os.listdir(ORDER_DIR)
     if not creation_time:
         creation_time = get_latest_file_creation_date(ORDER_DIR, files)
+        if not creation_time:
+            return None
     
     from_date = creation_time+"/.."
 

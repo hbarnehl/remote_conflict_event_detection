@@ -47,19 +47,32 @@ async def main():
     # await download_order_metadata(ORDER_DIR)
 
     # create order list: all files in ORDER_DIR
-    order_list = os.listdir(ORDER_DIR)[59:]
+    order_list = os.listdir(ORDER_DIR)
 
     if not order_list:
         print("No offline orders found")
         return
     
     print(f"{len(order_list)} orders found")
+
+    downloaded_orders = os.listdir(DOWNLOAD_DIR)
+
+    print(f"{len(downloaded_orders)} orders already downloaded")
+
+    remaining_orders = [order for order in order_list if order.split(".json")[0] not in downloaded_orders]
+
+    if not remaining_orders:
+        print("All orders already downloaded")
+        return
+    
+    print(f"{len(remaining_orders)} orders remaining. Begin download...")
+
     semaphore = asyncio.Semaphore(1)  
     async with Session() as sess:
         cl = sess.client('orders')
 
-        pbar = tqdm(total=len(order_list), smoothing=0.05)
-        await asyncio.gather(*(process_download(ORDER_DIR+ "/" + order, DOWNLOAD_DIR, cl, pbar, semaphore) for order in order_list))
+        pbar = tqdm(total=len(remaining_orders), smoothing=0.05)
+        await asyncio.gather(*(process_download(ORDER_DIR+ "/" + order, DOWNLOAD_DIR, cl, pbar, semaphore) for order in remaining_orders))
         pbar.close()
 
 if __name__ == "__main__":

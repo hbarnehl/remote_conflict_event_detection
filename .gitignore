@@ -7,3 +7,5 @@ search_results/*
 *.pdf
 *.pyc
 *.log
+*.pkl
+*.npy

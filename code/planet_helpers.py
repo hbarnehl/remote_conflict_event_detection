@@ -1,4 +1,3 @@
-from planet import order_request, Session, reporting, data_filter
 from datetime import datetime
 import os
 import json
@@ -27,6 +26,7 @@ def repair_aoi(geom):
         return geom
 
 def create_request(search_dict):
+   from planet import order_request
    '''
    This function creates an order request for the specified geometry, items, request name, item type, and asset type.
    geom: The geometry of the location of interest. This is used to clip the images to the specified area.
@@ -55,6 +55,7 @@ def create_request(search_dict):
    return order
 
 async def create_and_download_order(client, order_detail, directory, download=True):
+   from planet import reporting
    with reporting.StateBar(state='creating') as reporter:
        order = await client.create_order(order_detail)
        reporter.update(state='created', order_id=order['id'])
@@ -71,6 +72,7 @@ async def main_order(DOWNLOAD_DIR, search, cl, download=True):
 
 
 def set_filters(from_date, to_date, geom):
+    from planet import data_filter
     '''
     This function sets the filters for the search of images.
 
@@ -99,6 +101,7 @@ def set_filters(from_date, to_date, geom):
     return combined_filter
 
 async def create_and_download_search(name,filter, item_types="PSScene"):
+    from planet import Session
     async with Session() as sess:
         cl = sess.client('data')
         request = await cl.create_search(name=name,
@@ -114,9 +117,12 @@ async def create_and_download_search(name,filter, item_types="PSScene"):
     
     return item_list
 
-def load_search_files(folder_path, num_files, timeline_ids=None, start_index=0):
+def load_search_files(folder_path, num_files=True, timeline_ids=None, start_index=0):
+    from tqdm import tqdm
     files = os.listdir(folder_path)
     json_data = []
+    if num_files:
+        num_files = len(files)
 
     if timeline_ids:
         # Load files by timeline_ids
@@ -125,7 +131,7 @@ def load_search_files(folder_path, num_files, timeline_ids=None, start_index=0):
         # Load files by alphabetic order with starting index
         files_to_load = sorted(files)[start_index:start_index + num_files]
 
-    for file_name in files_to_load:
+    for file_name in tqdm(files_to_load):
         try:
             with open(os.path.join(folder_path, file_name), 'r') as file:
                 data = json.load(file)
@@ -185,6 +191,7 @@ def get_latest_file_creation_date(directory, files=None):
 
 # write function to download the metadata of all orders whose metadata has not been downloaded yet
 async def download_order_metadata(ORDER_DIR, creation_time=None):
+    from planet import Session
     import os
     import json
     from tqdm import tqdm

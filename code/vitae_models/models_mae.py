@@ -16,13 +16,6 @@ import torch.nn as nn
 
 from timm.models.vision_transformer import PatchEmbed, Block
 
-import sys
-script_dir = '../../Remote-Sensing-RVSA/'
-sys.path.append(script_dir)
-
-script_dir = '../../Remote-Sensing-RVSA/MAEPretrain_SceneClassification/'
-sys.path.append(script_dir)
-
 from util.pos_embed import get_2d_sincos_pos_embed
 
 

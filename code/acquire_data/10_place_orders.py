@@ -3,7 +3,7 @@ import pandas as pd
 import getpass
 
 from planet import Session, Auth
-from planet_helpers import parse_polygon, main_order, repair_aoi, get_offline_order_names, download_order_metadata
+from code.acquire_data.planet_helpers import parse_polygon, main_order, repair_aoi, get_offline_order_names, download_order_metadata
 
 import asyncio
 from tqdm.asyncio import tqdm  # Use tqdm.asyncio for async support

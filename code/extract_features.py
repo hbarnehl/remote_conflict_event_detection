@@ -7,13 +7,10 @@ from pathlib import Path
 import sys
 import rasterio
 
-script_dir = '../../Remote-Sensing-RVSA/'
-sys.path.append(script_dir)
-
 # Import your custom modules
-from MAEPretrain_SceneClassification.models_mae import mae_vit_base_patch16_dec512d8b
+from vitae_models.models_mae import mae_vit_base_patch16_dec512d8b
 
-from torch_helpers import ChangeDetectionDataset
+from cd_dataset import ChangeDetectionDataset
 
 def load_model(checkpoint_path, device='cuda'):
     """
@@ -33,54 +30,54 @@ def load_model(checkpoint_path, device='cuda'):
     model.eval()
     return model
 
-def load_4band_image(path):
-    """Load a 4-band image and ensure it has dimensions [1, channels, height, width]"""
-    with rasterio.open(path) as src:
-        # Read the bands (assuming band 1 is infrared, band 2 is red, band 3 is green, band 4 is blue)
-        blue = src.read(1)
-        green = src.read(2)
-        red = src.read(3)
+# def load_4band_image(path):
+#     """Load a 4-band image and ensure it has dimensions [1, channels, height, width]"""
+#     with rasterio.open(path) as src:
+#         # Read the bands (assuming band 1 is infrared, band 2 is red, band 3 is green, band 4 is blue)
+#         blue = src.read(1)
+#         green = src.read(2)
+#         red = src.read(3)
 
-        # Stack the bands into a single array
-        img = np.stack((red, green, blue), axis=0)  # [channels, height, width]
+#         # Stack the bands into a single array
+#         img = np.stack((red, green, blue), axis=0)  # [channels, height, width]
 
-        # Normalize the image
-        mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
-        std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
-        img = (img / 255.0 - mean) / std
+#         # Normalize the image
+#         mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
+#         std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
+#         img = (img / 255.0 - mean) / std
 
-        # Convert to tensor and add batch dimension
-        img = torch.from_numpy(img).float()
-        img = img.unsqueeze(0)  # [1, channels, height, width]
+#         # Convert to tensor and add batch dimension
+#         img = torch.from_numpy(img).float()
+#         img = img.unsqueeze(0)  # [1, channels, height, width]
 
-    return img
+#     return img
 
 
-def extract_features(model, image, device='cuda', batch_size=1):
-    """
-    Extract features from an image using the pretrained model
+# def extract_features(model, image, device='cuda', batch_size=1):
+#     """
+#     Extract features from an image using the pretrained model
     
-    Args:
-        model: Pretrained model
-        image: Input tensor of shape [C, H, W]
-        device: Device to run inference on
-        batch_size: Batch size for processing
+#     Args:
+#         model: Pretrained model
+#         image: Input tensor of shape [C, H, W]
+#         device: Device to run inference on
+#         batch_size: Batch size for processing
         
-    Returns:
-        Extracted features
-    """
-    # Ensure image has batch dimension
-    if len(image.shape) == 3:
-        image = image.unsqueeze(0)  # [1, C, H, W]
+#     Returns:
+#         Extracted features
+#     """
+#     # Ensure image has batch dimension
+#     if len(image.shape) == 3:
+#         image = image.unsqueeze(0)  # [1, C, H, W]
         
-    # Move to device
-    image = image.to(device)
+#     # Move to device
+#     image = image.to(device)
     
-    # Extract features without computing gradients
-    with torch.no_grad():
-        features, _, _ = model.forward_encoder(image, mask_ratio=0.0)
+#     # Extract features without computing gradients
+#     with torch.no_grad():
+#         features, _, _ = model.forward_encoder(image, mask_ratio=0.0)
     
-    return features
+#     return features
 
 def process_large_image_efficiently(model, image, window_size=224, overlap=56, device='cuda', batch_size=4):
     """

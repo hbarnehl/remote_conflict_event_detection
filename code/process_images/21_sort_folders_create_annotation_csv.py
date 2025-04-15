@@ -65,13 +65,49 @@ for img_dir, event_id in tqdm(zip(img_dirs_after, image_event_ids_after)):
     
 ############ Now create annotations file ############
 
-event_df = pd.read_csv(os.path.join(DATA_DIR, 'ACLED_Ukraine_events_timeline.csv'))
+img_dirs_before = [int(id) for id in os.listdir(IMG_DIR_BEFORE)]
+
+event_df = pd.read_csv(os.path.join(DATA_DIR, 'events_data/ACLED_Ukraine_events_timeline.csv'))
 
 # keep only rows where timeline_id is in image_event_ids_before
-event_df_filtered = event_df[event_df['timeline_id'].isin(image_event_ids_before)]
+event_df_filtered = event_df[event_df['timeline_id'].isin(img_dirs_before)]
+
+# left join with places_ukraine.csv
+places_df = pd.read_csv(os.path.join(DATA_DIR, 'events_data/ukraine_places.csv'))[['location_id', 'location', "admin1"]]
+event_df_filtered = event_df_filtered.merge(places_df, how='left', left_on='location_id', right_on='location_id')
 
 # keep only columns that are relevant
-event_df_filtered = event_df_filtered[['timeline_id', 'location_id', 'event_date', 'overlapping_event',
+event_df_filtered = event_df_filtered[['timeline_id', 'location_id', "location", "admin1", 'event_date', 'overlapping_event',
                                        'event', 'any_event', 'cum_attack']]
 # save to csv
 event_df_filtered.to_csv(os.path.join(DATA_DIR, 'annotations_ukraine.csv'), index=False)
+
+import json
+
+img_dirs_before = os.listdir(IMG_DIR_BEFORE)
+img_dirs_after =  os.listdir(IMG_DIR_AFTER)
+
+df_columns = ['clear_percent', 'cloud_percent', 'shadow_percent', 'snow_ice_percent','visible_percent']
+
+# empty df
+df = pd.DataFrame()
+counter=0
+for id in tqdm(img_dirs_before):
+    counter += 1
+    with open(os.path.join(IMG_DIR_BEFORE, id, "files", "composite_metadata.json"), 'r') as file:
+        before_json = json.load(file)["properties"]
+    with open(os.path.join(IMG_DIR_AFTER, id, "files", "composite_metadata.json"), 'r') as file:
+        after_json = json.load(file)["properties"]
+    # create new row with the values from the json files, prefix with "before_" and "after_"
+    new_row_before = {f'before_{key}': before_json[key] for key in df_columns}
+    new_row_after = {f'after_{key}': after_json[key] for key in df_columns}
+    # create new row with the id
+    new_row = {'id': id}
+    # concatenate the new rows
+    new_row.update(new_row_before)
+    new_row.update(new_row_after)
+    # append the new row to the df
+    df = pd.concat([df, pd.DataFrame(new_row, index=[0])], ignore_index=True)
+
+# save to csv
+df.to_csv(os.path.join(DATA_DIR, 'metadata_ukraine.csv'), index=False)

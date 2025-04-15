@@ -1,6 +1,11 @@
-
+import torch.utils.checkpoint as checkpoint
 import torch.nn as nn
 import torch
+
+def print_cuda_memory():
+    print(f"Allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+    print(f"Cached: {torch.cuda.memory_reserved() / 1024**2:.2f} MB")
+    print(f"Max allocated: {torch.cuda.max_memory_allocated() / 1024**2:.2f} MB\n")
 
 # this classifier replicates the logistic regression of the demo
 class L1RegularizedLinear(nn.Module):
@@ -48,13 +53,19 @@ class ChangeDetectionModel(nn.Module):
         self.feature_pooling = feature_pooling
         self.feature_combination = feature_combination
         self.l1_lambda = l1_lambda
+        self.classifier_type = classifier_type
         
         # By default, freeze the feature extractor
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
             
-        # Determine feature dimension
-        self.feature_dim = self.feature_extractor.embed_dim
+        # Determine feature dimension by accessing the attribute correctly
+        # For MaskedAutoencoderViT the embed_dim is stored as a regular attribute
+        if hasattr(self.feature_extractor, 'embed_dim'):
+            self.feature_dim = self.feature_extractor.embed_dim
+        else:
+            # Fallback to accessing via __dict__ or setting manually if needed
+            self.feature_dim = getattr(self.feature_extractor, 'embed_dim', 768)
         
         # Create classifier based on feature combination method
         input_dim = self.feature_dim * 2 if feature_combination == 'concatenate' else self.feature_dim
@@ -106,7 +117,7 @@ class ChangeDetectionModel(nn.Module):
                 if training:
                     window_batches.append(patch)
                     current_batch = []
-        
+
         # For inference, we batch windows for efficiency
         if not training and current_batch:
             window_batches.append(torch.cat(current_batch, dim=0))
@@ -118,13 +129,27 @@ class ChangeDetectionModel(nn.Module):
             # During training, process each window individually to maintain proper gradient flow
             for i, window in enumerate(window_batches):
                 h, w = window_positions[i]
-                features, _, _ = self.feature_extractor.forward_encoder(window, mask_ratio=0.0)
-                feature_map[(h, w)] = features
+                
+                with torch.set_grad_enabled(True):
+                    # Extract intermediate features using hooks instead of forward_encoder
+                    features = self.get_intermediate_features(window)
+                    feature_map[(h, w)] = features
+                
+                # Intentionally break references to the input window and extracted features
+                del features, window
+                
+                # Force memory reclamation if needed (every N windows)
+                if i % 10 == 0 and i > 0:
+                    torch.cuda.empty_cache()
+                    print(f"After processing window {i+1}/{len(window_batches)}:")
+                    print_cuda_memory()
+        
         else:
             # During inference, use torch.no_grad for efficiency
             with torch.no_grad():
                 for batch_idx, batch in enumerate(window_batches):
-                    features, _, _ = self.feature_extractor.forward_encoder(batch, mask_ratio=0.0)
+                    # Extract intermediate features
+                    features = self.get_intermediate_features(batch)
                     
                     # Assign features to their respective positions
                     start_idx = batch_idx * batch.size(0)
@@ -133,10 +158,15 @@ class ChangeDetectionModel(nn.Module):
                     for i, position_idx in enumerate(range(start_idx, end_idx)):
                         h, w = window_positions[position_idx]
                         feature_map[(h, w)] = features[i:i+1]  # Keep batch dimension
-        
+        print("After extracting features:")
+        print_cuda_memory()
+
         # Merge feature maps
         merged_features = self.merge_feature_map(feature_map, (H, W))
-        
+        print(f"After merging feature map:")
+        print_cuda_memory()
+
+
         # Clean up feature map to free memory
         del feature_map
         torch.cuda.empty_cache()
@@ -153,6 +183,32 @@ class ChangeDetectionModel(nn.Module):
         else:
             # If using diff_first, return the full feature map for later processing
             return merged_features
+        
+    def get_intermediate_features(self, x):
+        """Extract intermediate features from the ViT_Win_RVSA model"""
+        # Get patch embeddings
+        B, C, H, W = x.shape
+        x, (Hp, Wp) = self.feature_extractor.patch_embed(x)
+        
+        # Add positional embedding if present
+        if self.feature_extractor.pos_embed is not None:
+            x = x + self.feature_extractor.pos_embed[:, 1:]  # Skip cls token position
+        x = self.feature_extractor.pos_drop(x)
+        
+        # Process through blocks
+        for i, blk in enumerate(self.feature_extractor.blocks):
+            x = checkpoint.checkpoint(blk, x, Hp, Wp)
+        
+        # Apply normalization
+        x = self.feature_extractor.norm(x)
+        
+        # Create a CLS-like token by averaging features (similar to pooling)
+        cls_token = x.mean(dim=1, keepdim=True)
+        
+        # Concatenate the pooled token as a CLS token
+        features = torch.cat([cls_token, x], dim=1)
+        
+        return features
     
     def merge_feature_map(self, feature_map, image_shape):
         """Merge overlapping feature patches with circular region optimization"""
@@ -165,7 +221,9 @@ class ChangeDetectionModel(nn.Module):
         feature_dim = next(iter(feature_map.values())).shape[-1]
         
         # Get device
-        device = next(iter(feature_map.values())).device
+        first_feature = next(iter(feature_map.values()))
+        device = first_feature.device
+        batch_size = first_feature.size(0)  # Get actual batch size
         
         # Create circle mask
         h_center, w_center = H/2, W/2
@@ -181,10 +239,12 @@ class ChangeDetectionModel(nn.Module):
         
         # Create circular mask (1 for patches in circle, 0 outside)
         circle_mask = (patch_distances <= (radius + patch_size/2)).float().unsqueeze(0).unsqueeze(-1)
+        # Expand circle_mask to match batch size
+        circle_mask = circle_mask.expand(batch_size, -1, -1, -1)
         
-        # Initialize sparse accumulators
-        merged = torch.zeros((1, feature_h, feature_w, feature_dim), device=device)
-        counts = torch.zeros((1, feature_h, feature_w, 1), device=device)
+        # Initialize sparse accumulators with proper batch size
+        merged = torch.zeros((batch_size, feature_h, feature_w, feature_dim), device=device)
+        counts = torch.zeros((batch_size, feature_h, feature_w, 1), device=device)
         
         # Get indices of patches within the circle (as a mask)
         valid_patches = (circle_mask > 0).squeeze(-1)  # [1, H, W]
@@ -229,26 +289,27 @@ class ChangeDetectionModel(nn.Module):
         merged = torch.where(counts > 0, merged / (counts + 1e-8), merged)
         
         # Average all CLS tokens
-        avg_cls_token = torch.mean(torch.cat(cls_tokens, dim=0), dim=0, keepdim=True).unsqueeze(0)
-        
+        avg_cls_token = torch.mean(torch.cat(cls_tokens, dim=0), dim=0, keepdim=True)  # Shape: [1, D]
+        # Expand to batch size
+        avg_cls_token = avg_cls_token.expand(batch_size, -1, -1)  # Shape: [B, 1, D]
+                
         # Create final feature vector - but only include patches inside the circle
         # patches_in_circle = valid_patches.sum().item()
-        
+
         # Convert valid patches to flat index array for efficient selection
         flat_indices = torch.nonzero(valid_patches.view(-1)).squeeze()
-        
+
         # Extract only active features from merged tensor
         B, H, W, D = merged.shape
         merged_view = merged.view(-1, D)  # Flatten spatial dimensions
         circle_features = merged_view[flat_indices]  # [num_valid_patches, D]
-        
+
         # Reshape as if it were a normal feature tensor
         merged_flat = circle_features.view(B, -1, D)  # [B, num_valid_patches, D]
-        
+
         # Store information about valid patch locations for later use
         self.valid_patch_mask = valid_patches  # Store for reference
             
-        
         # Add CLS token
         merged_with_cls = torch.cat([avg_cls_token, merged_flat], dim=1)
         
@@ -288,24 +349,49 @@ class ChangeDetectionModel(nn.Module):
             delattr(self, 'valid_patch_mask')
         
         # Set training mode
-        is_training = self.training and any(p.requires_grad for p in self.feature_extractor.parameters())
-        
+        is_training = self.training
+
         if self.feature_combination == 'diff_first':
             # Calculate difference at token level first, then pool
             before_features_full = self.extract_features_sliding_window(before_img, training=is_training)
+
+            print("After feature extraction 1:")
+            print_cuda_memory()
+
             after_features_full = self.extract_features_sliding_window(after_img, training=is_training)
             
+            print("After feature extraction 2:")
+            print_cuda_memory()
+
             # Calculate difference between token representations
             diff_features =  after_features_full - before_features_full
             
+            print("After calculating difference:")
+            print_cuda_memory()            
+
             # Free memory
             del before_features_full, after_features_full
             torch.cuda.empty_cache()
-            
+
             # Apply pooling
             pooled_diff = self.pool_features(diff_features)
+
+            print("After calculating pooled features:")
+            print_cuda_memory()
+
+            # Free memory
+            del diff_features
+            torch.cuda.empty_cache()
+
             logits = self.classifier(pooled_diff)
+
+            # Free memory
+            del pooled_diff
+            torch.cuda.empty_cache()
             
+            print("After final classification head:")
+            print_cuda_memory()
+
         elif self.feature_combination == 'difference':
             # Extract and pool features separately, then take difference
             before_features = self.extract_features_sliding_window(before_img, training=is_training)
@@ -336,4 +422,4 @@ class ChangeDetectionModel(nn.Module):
             # Classify
             logits = self.classifier(combined_features)
         
-        return torch.sigmoid(logits)
+        return logits

@@ -11,7 +11,7 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": "${command:pickArgs}",
-            "python": "/home/hennes/.pyenv/versions/3.9.21/envs/seminar_paper/bin/python",
+            "python": "/home/hennes/.pyenv/versions/3.12.7/envs/transcribe_videos/bin/python",
             "cwd": "${fileDirname}"
         },
     ]

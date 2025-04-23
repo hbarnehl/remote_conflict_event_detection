@@ -2,6 +2,9 @@ import torch.utils.checkpoint as checkpoint
 import torch.nn as nn
 import torch
 
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 def print_cuda_memory():
     print(f"Allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
     print(f"Cached: {torch.cuda.memory_reserved() / 1024**2:.2f} MB")
@@ -33,7 +36,8 @@ class L1RegularizedLinear(nn.Module):
 
 class ChangeDetectionModel(nn.Module):
     def __init__(self, feature_extractor, classifier_type='linear', window_size=224, overlap=56, 
-             feature_pooling='cls', feature_combination='concatenate', l1_lambda=0.01):
+             feature_pooling='cls', feature_combination='concatenate', l1_lambda=0.01, freeze_features=False,
+             head_only=False, dropout1=0.3, dropout2=0.3):
         """
         End-to-end model for change detection with sliding window feature extraction
         
@@ -54,6 +58,9 @@ class ChangeDetectionModel(nn.Module):
         self.feature_combination = feature_combination
         self.l1_lambda = l1_lambda
         self.classifier_type = classifier_type
+        self.freeze_features = freeze_features
+        self.head_only = head_only
+
         
         # By default, freeze the feature extractor
         for param in self.feature_extractor.parameters():
@@ -75,10 +82,15 @@ class ChangeDetectionModel(nn.Module):
             self.classifier = L1RegularizedLinear(input_dim, 1, l1_lambda=l1_lambda)
         elif classifier_type == 'mlp':
             self.classifier = torch.nn.Sequential(
-                torch.nn.Linear(input_dim, 256),
+                torch.nn.Linear(input_dim, 512),  # Wider first layer
+                torch.nn.BatchNorm1d(512),        # Add batch normalization
                 torch.nn.ReLU(),
-                torch.nn.Dropout(0.5),
-                torch.nn.Linear(256, 1)
+                torch.nn.Dropout(dropout1),            # Slightly less dropout
+                torch.nn.Linear(512, 128),        # Add another layer
+                torch.nn.BatchNorm1d(128),
+                torch.nn.ReLU(),
+                torch.nn.Dropout(dropout2),
+                torch.nn.Linear(128, 1)
             )
         
         # Optional attention layer for feature pooling
@@ -113,63 +125,42 @@ class ChangeDetectionModel(nn.Module):
                 current_batch.append(patch)
                 window_positions.append((h, w))
                 
-                # Process as individual windows to maintain proper gradient flow during training
-                if training:
-                    window_batches.append(patch)
-                    current_batch = []
-
-        # For inference, we batch windows for efficiency
-        if not training and current_batch:
-            window_batches.append(torch.cat(current_batch, dim=0))
+                window_batches.append(patch)
+                current_batch = []
         
         # Process batches and extract features
         feature_map = {}
         
-        if training:
+        if training and not self.freeze_features:
             # During training, process each window individually to maintain proper gradient flow
             for i, window in enumerate(window_batches):
                 h, w = window_positions[i]
                 
                 with torch.set_grad_enabled(True):
                     # Extract intermediate features using hooks instead of forward_encoder
-                    features = self.get_intermediate_features(window)
+                    features = self.feature_extractor.forward_features(window)
                     feature_map[(h, w)] = features
                 
                 # Intentionally break references to the input window and extracted features
                 del features, window
-                
-                # Force memory reclamation if needed (every N windows)
-                if i % 10 == 0 and i > 0:
-                    torch.cuda.empty_cache()
-                    print(f"After processing window {i+1}/{len(window_batches)}:")
-                    print_cuda_memory()
-        
+       
         else:
             # During inference, use torch.no_grad for efficiency
             with torch.no_grad():
-                for batch_idx, batch in enumerate(window_batches):
-                    # Extract intermediate features
-                    features = self.get_intermediate_features(batch)
-                    
-                    # Assign features to their respective positions
-                    start_idx = batch_idx * batch.size(0)
-                    end_idx = min(start_idx + batch.size(0), len(window_positions))
-                    
-                    for i, position_idx in enumerate(range(start_idx, end_idx)):
-                        h, w = window_positions[position_idx]
-                        feature_map[(h, w)] = features[i:i+1]  # Keep batch dimension
-        print("After extracting features:")
-        print_cuda_memory()
+                for i, window in enumerate(window_batches):
+                    h, w = window_positions[i]
 
+                    # Extract intermediate features
+                    features = self.feature_extractor.forward_features(window)
+                    feature_map[(h, w)] = features
+
+                # Intentionally break references to the input window and extracted features
+                del features, window
         # Merge feature maps
         merged_features = self.merge_feature_map(feature_map, (H, W))
-        print(f"After merging feature map:")
-        print_cuda_memory()
-
 
         # Clean up feature map to free memory
         del feature_map
-        torch.cuda.empty_cache()
 
         if self.feature_combination != 'diff_first':
             # Apply feature pooling
@@ -177,97 +168,69 @@ class ChangeDetectionModel(nn.Module):
 
             # Clean up merged features to free memory
             del merged_features
-            torch.cuda.empty_cache()
         
             return pooled_features
         else:
             # If using diff_first, return the full feature map for later processing
             return merged_features
         
-    def get_intermediate_features(self, x):
-        """Extract intermediate features from the ViT_Win_RVSA model"""
-        # Get patch embeddings
-        B, C, H, W = x.shape
-        x, (Hp, Wp) = self.feature_extractor.patch_embed(x)
+    # def get_intermediate_features(self, x):
+    #     """Extract intermediate features from the ViT_Win_RVSA model"""
+    #     # Get patch embeddings
+    #     B, C, H, W = x.shape
+    #     x, (Hp, Wp) = self.feature_extractor.patch_embed(x)
         
-        # Add positional embedding if present
-        if self.feature_extractor.pos_embed is not None:
-            x = x + self.feature_extractor.pos_embed[:, 1:]  # Skip cls token position
-        x = self.feature_extractor.pos_drop(x)
+    #     # Add positional embedding if present
+    #     if self.feature_extractor.pos_embed is not None:
+    #         x = x + self.feature_extractor.pos_embed[:, 1:]  # Skip cls token position
+    #     x = self.feature_extractor.pos_drop(x)
         
-        # Process through blocks
-        for i, blk in enumerate(self.feature_extractor.blocks):
-            x = checkpoint.checkpoint(blk, x, Hp, Wp)
+    #     # Process through blocks
+    #     for i, blk in enumerate(self.feature_extractor.blocks):
+    #         x = checkpoint.checkpoint(blk, x, Hp, Wp)
         
-        # Apply normalization
-        x = self.feature_extractor.norm(x)
+    #     # Apply normalization
+    #     x = self.feature_extractor.norm(x)
         
-        # Create a CLS-like token by averaging features (similar to pooling)
-        cls_token = x.mean(dim=1, keepdim=True)
+    #     # Create a CLS-like token by averaging features (similar to pooling)
+    #     cls_token = x.mean(dim=1, keepdim=True)
         
-        # Concatenate the pooled token as a CLS token
-        features = torch.cat([cls_token, x], dim=1)
+    #     # Concatenate the pooled token as a CLS token
+    #     features = torch.cat([cls_token, x], dim=1)
         
-        return features
+    #     return features
     
     def merge_feature_map(self, feature_map, image_shape):
-        """Merge overlapping feature patches with circular region optimization"""
+        """Merge overlapping feature patches without circular region filtering"""
         H, W = image_shape
         patch_size = 16  # ViT-B patch size
         
         # Calculate feature dimensions
         feature_h = H // patch_size
         feature_w = W // patch_size
-        feature_dim = next(iter(feature_map.values())).shape[-1]
         
-        # Get device
+        # Get device and dimensions from first feature
         first_feature = next(iter(feature_map.values()))
         device = first_feature.device
-        batch_size = first_feature.size(0)  # Get actual batch size
+        batch_size = first_feature.size(0)
+        feature_dim = first_feature.shape[-1]
         
-        # Create circle mask
-        h_center, w_center = H/2, W/2
-        radius = min(H, W)/2 - 1
-        
-        # Calculate center of each patch in image space
-        y_centers = torch.arange(feature_h, device=device) * patch_size + patch_size/2
-        x_centers = torch.arange(feature_w, device=device) * patch_size + patch_size/2
-        
-        # Create patch distance matrix
-        y_grid, x_grid = torch.meshgrid(y_centers, x_centers)
-        patch_distances = torch.sqrt((y_grid - h_center)**2 + (x_grid - w_center)**2)
-        
-        # Create circular mask (1 for patches in circle, 0 outside)
-        circle_mask = (patch_distances <= (radius + patch_size/2)).float().unsqueeze(0).unsqueeze(-1)
-        # Expand circle_mask to match batch size
-        circle_mask = circle_mask.expand(batch_size, -1, -1, -1)
-        
-        # Initialize sparse accumulators with proper batch size
+        # Pre-allocate memory only once
         merged = torch.zeros((batch_size, feature_h, feature_w, feature_dim), device=device)
-        counts = torch.zeros((batch_size, feature_h, feature_w, 1), device=device)
+        counts = torch.ones((batch_size, feature_h, feature_w, 1), device=device) * 1e-8  # Avoid div by zero
         
-        # Get indices of patches within the circle (as a mask)
-        valid_patches = (circle_mask > 0).squeeze(-1)  # [1, H, W]
+        # Collect CLS tokens more efficiently
+        cls_tokens = torch.zeros((len(feature_map), batch_size, feature_dim), device=device)
         
-        # Only process patches that overlap with the circle
-        cls_tokens = []
-        
-        # Add each feature patch - only to relevant locations
-        for (h, w), feat in feature_map.items():
-            # Save CLS token
-            cls_tokens.append(feat[:, 0, :])
+        # Process all windows at once
+        for idx, ((h, w), feat) in enumerate(feature_map.items()):
+            # Store CLS token without creating new tensors
+            cls_tokens[idx] = feat[:, 0, :]
             
-            # Calculate token position
+            # Calculate token positions
             h_token = h // patch_size
             w_token = w // patch_size
             tokens_per_side = self.window_size // patch_size
-            
-            # Process patch tokens (skip CLS token)
-            feature_tokens = feat[:, 1:, :]
-            B, L, D = feature_tokens.shape
-            
-            # Reshape to spatial grid
-            feat_reshaped = feature_tokens.reshape(B, tokens_per_side, tokens_per_side, D)
             
             # Calculate boundaries
             h_end = min(h_token + tokens_per_side, feature_h)
@@ -275,45 +238,24 @@ class ChangeDetectionModel(nn.Module):
             h_size = h_end - h_token
             w_size = w_end - w_token
             
-            # Check if this window overlaps with the circular region at all
-            window_valid_mask = valid_patches[:, h_token:h_end, w_token:w_end]
-            if not window_valid_mask.any():
-                continue  # Skip this window entirely if outside circle
-                
-            # Add features only within circle - apply mask
-            window_mask = circle_mask[:, h_token:h_end, w_token:w_end, :]
-            merged[:, h_token:h_end, w_token:w_end] += feat_reshaped[:, :h_size, :w_size] * window_mask
-            counts[:, h_token:h_end, w_token:w_end] += window_mask
-        
-        # Average overlapping regions (only where counts > 0)
-        merged = torch.where(counts > 0, merged / (counts + 1e-8), merged)
-        
-        # Average all CLS tokens
-        avg_cls_token = torch.mean(torch.cat(cls_tokens, dim=0), dim=0, keepdim=True)  # Shape: [1, D]
-        # Expand to batch size
-        avg_cls_token = avg_cls_token.expand(batch_size, -1, -1)  # Shape: [B, 1, D]
-                
-        # Create final feature vector - but only include patches inside the circle
-        # patches_in_circle = valid_patches.sum().item()
-
-        # Convert valid patches to flat index array for efficient selection
-        flat_indices = torch.nonzero(valid_patches.view(-1)).squeeze()
-
-        # Extract only active features from merged tensor
-        B, H, W, D = merged.shape
-        merged_view = merged.view(-1, D)  # Flatten spatial dimensions
-        circle_features = merged_view[flat_indices]  # [num_valid_patches, D]
-
-        # Reshape as if it were a normal feature tensor
-        merged_flat = circle_features.view(B, -1, D)  # [B, num_valid_patches, D]
-
-        # Store information about valid patch locations for later use
-        self.valid_patch_mask = valid_patches  # Store for reference
+            # Get patch tokens efficiently (avoid unnecessary copying)
+            feat_reshaped = feat[:, 1:, :].reshape(batch_size, tokens_per_side, tokens_per_side, feature_dim)
             
-        # Add CLS token
-        merged_with_cls = torch.cat([avg_cls_token, merged_flat], dim=1)
+            # Add features in-place
+            merged[:, h_token:h_end, w_token:w_end] += feat_reshaped[:, :h_size, :w_size]
+            counts[:, h_token:h_end, w_token:w_end] += 1
         
-        return merged_with_cls
+        # Normalize with single division
+        merged.div_(counts)
+        
+        # Compute mean CLS token efficiently
+        avg_cls_token = cls_tokens.mean(dim=0, keepdim=True).view(batch_size, 1, feature_dim)
+        
+        # Reshape merged features once
+        merged_flat = merged.reshape(batch_size, feature_h*feature_w, feature_dim)
+        
+        # Concatenate efficiently
+        return torch.cat([avg_cls_token, merged_flat], dim=1)
     
     def pool_features(self, features):
         """Pool features based on selected method"""
@@ -342,42 +284,29 @@ class ChangeDetectionModel(nn.Module):
             avg_patch = torch.mean(features[:, 1:, :], dim=1)
             return torch.cat([cls_token, avg_patch], dim=1)
     
-    def forward(self, before_img, after_img):
+    def forward(self, before_img=None, after_img=None, diff_features=None):
         """Forward pass through the model with memory optimization for circular images"""
-        # Clear previous mask information
-        if hasattr(self, 'valid_patch_mask'):
-            delattr(self, 'valid_patch_mask')
         
         # Set training mode
         is_training = self.training
 
+        if self.head_only:
+            logits = self.classifier(diff_features)
+            return logits
+
         if self.feature_combination == 'diff_first':
-            # Calculate difference at token level first, then pool
+            # Conditionally use torch.no_grad() for feature extraction
             before_features_full = self.extract_features_sliding_window(before_img, training=is_training)
-
-            print("After feature extraction 1:")
-            print_cuda_memory()
-
             after_features_full = self.extract_features_sliding_window(after_img, training=is_training)
-            
-            print("After feature extraction 2:")
-            print_cuda_memory()
 
             # Calculate difference between token representations
-            diff_features =  after_features_full - before_features_full
-            
-            print("After calculating difference:")
-            print_cuda_memory()            
-
+            diff_features =  after_features_full - before_features_full          
             # Free memory
             del before_features_full, after_features_full
             torch.cuda.empty_cache()
 
             # Apply pooling
             pooled_diff = self.pool_features(diff_features)
-
-            print("After calculating pooled features:")
-            print_cuda_memory()
 
             # Free memory
             del diff_features
@@ -388,15 +317,12 @@ class ChangeDetectionModel(nn.Module):
             # Free memory
             del pooled_diff
             torch.cuda.empty_cache()
-            
-            print("After final classification head:")
-            print_cuda_memory()
 
         elif self.feature_combination == 'difference':
-            # Extract and pool features separately, then take difference
+           # Extract and pool features separately, then take difference
             before_features = self.extract_features_sliding_window(before_img, training=is_training)
             after_features = self.extract_features_sliding_window(after_img, training=is_training)
-            
+
             # Calculate difference between pooled features
             diff_features = after_features - before_features
             
@@ -408,10 +334,10 @@ class ChangeDetectionModel(nn.Module):
             logits = self.classifier(diff_features)
             
         else:  # 'concatenate' (default)
-            # Extract features from both images
+           # Extract features from both images
             before_features = self.extract_features_sliding_window(before_img, training=is_training)
             after_features = self.extract_features_sliding_window(after_img, training=is_training)
-            
+
             # Combine features by concatenation
             combined_features = torch.cat([before_features, after_features], dim=1)
             

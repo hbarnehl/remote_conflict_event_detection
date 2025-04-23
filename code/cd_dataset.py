@@ -14,52 +14,46 @@ import rasterio
 def load_4band_image(path):
     """Load a 4-band image and ensure it has dimensions [1, channels, height, width]"""
     with rasterio.open(path) as src:
-        # Read the bands (assuming band 1 is infrared, band 2 is red, band 3 is green, band 4 is blue)
-        blue = src.read(1)
-        green = src.read(2)
-        red = src.read(3)
-
-        # Stack the bands into a single array
-        img = np.stack((red, green, blue), axis=0)  # [channels, height, width]
-
-        img = enhance_dark_image(img)
-
-    return img
-
-# Apply adaptive brightness enhancement
-def enhance_dark_image(img, target_brightness=0.35):
+        # Read only needed bands directly into a single array
+        img = np.stack([src.read(i) for i in [3, 2, 1]], axis=0)  # RGB order
     
     # Normalize the image data to 0-1 range for display
     img_min, img_max = img.min(), img.max()
     img_scaled = (img - img_min) / (img_max - img_min)
 
-
-    # luminance = 0.2126 * img_scaled[0, :, :] + 0.7152 * img_scaled[1, :, :] + 0.0722 * img_scaled[2, :, :]
-
-    # # Calculate brightness using the mean of luminance
-    # non_zero_luminance = luminance[luminance > 0]
-
     # current_brightness = np.median(non_zero_luminance)
     current_brightness = np.mean(img_scaled)
+    target_brightness=0.35
 
-    # print(f"Current brightness: {current_brightness:.4f}")
-    
     if current_brightness < target_brightness:
         # Calculate gamma value
         gamma = np.log(target_brightness) / np.log(current_brightness + 1e-6)
         gamma = max(0.1, min(gamma, 2.0))  # Allow a wider range for gamma
         
         # Apply gamma correction
-        enhanced = np.power(img_scaled, gamma)
-        enhanced = np.clip(enhanced, 0, 1.0)
-        # print(f"Applied gamma correction: {gamma:.2f}")
-        return enhanced
-    else:
-        return img_scaled
+        np.power(img_scaled, gamma, out=img_scaled)
+        np.clip(img_scaled, 0, 1.0, out=img_scaled)
+
+    return img_scaled
 
 def center_crop(img, target_height=2017, target_width=2028):
     """Center crop images to the smallest common dimensions"""
     _, h, w = img.shape
+    # If the image is smaller, calculate padding
+    pad_h = max(0, target_height - h)
+    pad_w = max(0, target_width - w)
+
+    if pad_h > 0 or pad_w > 0:
+        # Pad with black pixels (value 0)
+        img = np.pad(
+            img,
+            ((0, 0), (pad_h // 2, pad_h - pad_h // 2), (pad_w // 2, pad_w - pad_w // 2)),
+            mode='constant',
+            constant_values=0
+        )
+        h, w = img.shape[1:]  # Update dimensions after padding
+
+    # Calculate cropping indices
     start_h = (h - target_height) // 2
     start_w = (w - target_width) // 2
     return img[:, start_h:start_h+target_height, start_w:start_w+target_width]
@@ -83,26 +77,30 @@ def reshape_for_torch(I):
     out = I.transpose((2, 0, 1))
     return from_numpy(out)
 
-
+def get_diff_features():
+    """Get difference features."""
+    
 
 class ChangeDetectionDataset(Dataset):
     """Change Detection dataset class, used for both training and test data."""
 
-    def __init__(self, path, before_path, after_path, stride=None, transform=None, normalise=True):
+    def __init__(self, path, before_path=None, after_path=None, diff_features_path=None, transform=None, normalise=True, use_diff_features=False):
         """
         Args:
-            path (string): Path to the csv file with annotations.
-            before_path (string): Path to the directory containing 'before' images.
-            after_path (string): Path to the directory containing 'after' images.
-            stride (int): Stride for sampling the images.
+            path (string): Path to the CSV file with annotations.
+            before_path (string): Path to the directory containing 'before' images (optional if using diff features).
+            after_path (string): Path to the directory containing 'after' images (optional if using diff features).
+            diff_features_path (string): Path to the pre-extracted difference features (optional).
             transform (callable, optional): Optional transform to be applied on a sample.
+            normalise (bool): Whether to normalize the images.
+            use_diff_features (bool): If True, load pre-extracted difference features instead of images.
         """
         self.normalise = normalise
         self.transform = transform
         self.path = path
         self.before_path = before_path
         self.after_path = after_path
-        self.stride = stride if stride else 1
+        self.use_diff_features = use_diff_features
 
         # Read the CSV and extract the timeline_id and binary label columns
         self.df = read_csv(path)
@@ -110,48 +108,63 @@ class ChangeDetectionDataset(Dataset):
         self.labels = self.df["event"].tolist()
         self.n_imgs = len(self.names)
 
+        # Load pre-extracted difference features if specified
+        if self.use_diff_features:
+            if diff_features_path is None:
+                raise ValueError("diff_features_path must be provided when use_diff_features=True")
+            self.diff_features = np.load(diff_features_path)
+
     def __len__(self):
         return self.n_imgs
+    
+    def is_valid_idx(self, idx):
+        """Check if files for this index exist and are readable."""
+        try:
+            im_name = self.names[idx]
+            before_img_path = os.path.join(self.before_path, im_name, "files", "composite.tif")
+            after_img_path = os.path.join(self.after_path, im_name, "files", "composite.tif")
+            
+            # Check if files exist
+            if not os.path.exists(before_img_path) or not os.path.exists(after_img_path):
+                print(f"Missing image files for {im_name}")
+                return False
+                
+            return True
+        except Exception as e:
+            print(f"Error checking index {idx}: {str(e)}")
+            return False
 
     def __getitem__(self, idx):
-        im_name = self.names[idx]
-        I1, I2 = read_img_duo(self.before_path, self.after_path, str(im_name))
-        label = self.labels[idx]
+        if self.use_diff_features:
+            # Load pre-extracted difference features
+            diff_features = self.diff_features[idx]
+            label = self.labels[idx]
+            image_id = self.names[idx]
 
+            # Convert to PyTorch tensor
+            diff_features = torch.from_numpy(diff_features).float()
+            sample = {'diff_features': diff_features, 'label': label, 'image_id': image_id}
 
-        # normalisation to 0-1 range
-        # I1 = I1.numpy()
-        # I2 = I2.numpy()  #12,128,128
+        else:
+            # Load raw images
+            im_name = self.names[idx]
+            I1, I2 = read_img_duo(self.before_path, self.after_path, str(im_name))
+            label = self.labels[idx]
 
-        if self.normalise:
-            mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
-            std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
-            I1 = (I1 - mean) / std
-            I2 = (I2 - mean) / std
+            if self.normalise:
+                mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
+                std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
+                I1 = (I1 - mean) / std
+                I2 = (I2 - mean) / std
 
+            I1 = center_crop(I1)
+            I2 = center_crop(I2)
 
-            # NOTE: Both z-score and min-max normalizations are applied sequentially
-            # to match the pre-trained model's expected input distribution.
+            # Convert to tensor
+            I1 = torch.from_numpy(I1).float().unsqueeze(0)
+            I2 = torch.from_numpy(I2).float().unsqueeze(0)
 
-            # kid1 = (I1 - I1.min(axis=(1, 2), keepdims=True))
-            # mom1 = (I1.max(axis=(1, 2), keepdims=True) - I1.min(axis=(1, 2), keepdims=True)+ 1e-8)
-            # I1 = kid1 / (mom1)
-
-            # kid2 = (I2 - I2.min(axis=(1, 2), keepdims=True))
-            # mom2 = (I2.max(axis=(1, 2), keepdims=True) - I2.min(axis=(1, 2), keepdims=True)+ 1e-8)
-            # I2 = kid2 / (mom2)
-
-        I1 = center_crop(I1)
-        I2 = center_crop(I2)
-
-        # I1 = from_numpy(I1.transpose((0, 1, 2)))
-        # I2 = from_numpy(I2.transpose((0, 1, 2)))
-
-        # Convert to tensor and add batch dimension
-        I1 = torch.from_numpy(I1).float().unsqueeze(0)
-        I2 = torch.from_numpy(I2).float().unsqueeze(0)
-
-        sample = {'I1': I1, 'I2': I2, 'label': label}
+            sample = {'I1': I1, 'I2': I2, 'label': label, 'image_id': im_name}
 
         if self.transform:
             sample = self.transform(sample)

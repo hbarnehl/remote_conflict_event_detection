@@ -4,11 +4,10 @@ import os
 from tqdm import tqdm
 import argparse
 from pathlib import Path
-import sys
-import rasterio
 
 # Import your custom modules
-from vitae_models.models_mae import mae_vit_base_patch16_dec512d8b
+from vitae_models.vit_win_rvsa import ViT_Win_RVSA
+from util.pos_embed import interpolate_pos_embed
 
 from cd_dataset import ChangeDetectionDataset
 
@@ -23,13 +22,24 @@ def load_model(checkpoint_path, device='cuda'):
     Returns:
         Loaded model
     """
-    model = mae_vit_base_patch16_dec512d8b()
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint['model'], strict=False)
+    model = ViT_Win_RVSA()
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')['model']
+    state_dict = model.state_dict()
+
+    for k in ['head.weight', 'head.bias']:
+        if k in checkpoint and checkpoint[k].shape != state_dict[k].shape:
+            print(f"Removing key {k} from pretrained checkpoint")
+            del checkpoint[k]
+
+    interpolate_pos_embed(model, checkpoint)
+
+    model.load_state_dict(checkpoint, strict=False)
+
     model.to(device)
     model.eval()
     return model
 
+    
 # def load_4band_image(path):
 #     """Load a 4-band image and ensure it has dimensions [1, channels, height, width]"""
 #     with rasterio.open(path) as src:
@@ -79,7 +89,7 @@ def load_model(checkpoint_path, device='cuda'):
     
 #     return features
 
-def process_large_image_efficiently(model, image, window_size=224, overlap=56, device='cuda', batch_size=4):
+def process_large_image_efficiently(model, image, window_size=512, overlap=32, device='cuda', batch_size=4):
     """
     Process large images using sliding windows with batched processing
     

@@ -20,6 +20,9 @@ import torch.utils.checkpoint as checkpoint
 from einops import rearrange, repeat
 from timm.models.layers import drop_path, to_2tuple, trunc_normal_
 
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
@@ -275,7 +278,7 @@ class RotatedVariedSizeWindowAttention(nn.Module):
             self.register_buffer("relative_position_index", relative_position_index)
 
             trunc_normal_(self.relative_position_bias_table, std=.02)
-            print('The relative_pos_embedding is used')
+            # print('The relative_pos_embedding is used')
 
     def forward(self, x, H, W):
         
@@ -628,7 +631,7 @@ class ViT_Win_RVSA(nn.Module):
 
         self.norm = norm_layer(embed_dim)
 
-        self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        # self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
         # manually initialize fc layer
         # trunc_normal_(self.head.weight, std=2e-5)
@@ -667,6 +670,7 @@ class ViT_Win_RVSA(nn.Module):
         return {'pos_embed', 'cls_token'}
 
     def forward_features(self, x):
+
         B, C, H, W = x.shape
         x, (Hp, Wp) = self.patch_embed(x)
         batch_size, seq_len, _ = x.size()
@@ -679,11 +683,14 @@ class ViT_Win_RVSA(nn.Module):
         for i, blk in enumerate(self.blocks):
             x = checkpoint.checkpoint(blk, x, Hp, Wp)
             
-        x = x.mean(dim=1)  # global pool without cls token
-
         x = self.norm(x)
 
-        x = self.head(x)
+        cls_token = x.mean(dim=1, keepdim=True)
+        
+        # Concatenate the pooled token as a CLS token
+        x = torch.cat([cls_token, x], dim=1)
+
+        # x = self.head(x)
         
         return x
         # xp = x.permute(0, 2, 1).reshape(B, -1, Hp, Wp)

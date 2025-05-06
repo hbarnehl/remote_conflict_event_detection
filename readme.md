@@ -1,4 +1,4 @@
-****# Change Detection Project
+# Change Detection Project
 
 This repository contains code for a satellite image change detection project that uses deep learning techniques to identify whether a conflict event has taken place between images taken at different times.
 

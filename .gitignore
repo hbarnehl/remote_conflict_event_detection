@@ -9,3 +9,4 @@ search_results/*
 *.log
 *.pkl
 *.npy
+figures/*
